@@ -1,0 +1,44 @@
+name: LunesHost Auto Login
+
+on:
+  schedule:
+    # 每天 UTC 0点 (北京时间 8点) 运行
+    - cron: '0 0 * * *'
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  login:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y xvfb
+        npm install
+        npx playwright install-deps chrome
+      
+    - name: Run Login Script
+      env:
+        # Lunes Host 账户配置 JSON 格式: [{"username": "xxx", "password": "xxx"}, ...]
+        USERS_JSON: ${{ secrets.LUNES_USERS_JSON }}
+        # 代理配置（可选）
+        HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
+        # 企业微信机器人 Key
+        WECHAT_KEY: ${{ secrets.WECHAT_KEY }}
+      run: xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" node lunes_login.js
+
+    - name: Upload Screenshots
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: lunes-screenshots-${{ github.run_id }}
+        path: screenshots/
+        retention-days: 7
