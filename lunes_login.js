@@ -19,6 +19,8 @@ const CONFIG = {
         emailInput: 'input#email, input[name="email"], input[type="email"]',
         passwordInput: 'input#password, input[name="password"], input[type="password"]',
         loginButton: 'button[type="submit"], button:has-text("Login"), button:has-text("Sign in")',
+        // 服务器卡片
+        serverCard: 'a.server-card',
     },
     
     // 登录成功判断
@@ -30,21 +32,14 @@ const CONFIG = {
 const WECHAT_KEY = process.env.WECHAT_KEY;
 const WECHAT_WEBHOOK_BASE = 'https://qyapi.weixin.qq.com/cgi-bin/webhook';
 
-// 增加超时配置
-const AXIOS_CONFIG = {
-    timeout: 60000, // 60秒超时
-    maxBodyLength: 50 * 1024 * 1024,
-    maxContentLength: 50 * 1024 * 1024
-};
-
 // ==================== 调试输出 ====================
 console.log('========== 环境变量调试 ==========');
 console.log('WECHAT_KEY:', WECHAT_KEY ? '已设置' : '未设置');
 console.log('USERS_JSON:', process.env.USERS_JSON ? '已设置' : '未设置');
 console.log('===================================');
 
-// 截图目录
-const SCREENSHOT_DIR = path.join(process.cwd(), 'screenshots');
+// 临时截图目录（用于企业微信上传）
+const SCREENSHOT_DIR = path.join(process.cwd(), 'temp_screenshots');
 if (!fs.existsSync(SCREENSHOT_DIR)) {
     fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
 }
@@ -63,14 +58,13 @@ function getSafeUsername(username) {
     return masked.replace(/[^a-z0-9]/gi, '_');
 }
 
-// 保存截图
-async function saveScreenshot(page, filename) {
+// 截图到内存并保存为临时文件
+async function captureScreenshot(page, filename) {
     const filepath = path.join(SCREENSHOT_DIR, filename);
     try {
-        // 设置视口大小确保截图完整
         await page.setViewportSize({ width: 1280, height: 720 });
         await page.screenshot({ path: filepath, fullPage: false });
-        console.log(`📸 截图已保存: ${filename}`);
+        console.log(`📸 截图已捕获: ${filename}`);
         return filepath;
     } catch (e) {
         console.error('截图失败:', e.message);
@@ -78,18 +72,28 @@ async function saveScreenshot(page, filename) {
     }
 }
 
-// 上传图片到企业微信获取 media_id
-async function uploadWechatImage(imagePath) {
+// 截图并直接获取 Buffer（不保存文件）
+async function captureScreenshotBuffer(page) {
+    try {
+        await page.setViewportSize({ width: 1280, height: 720 });
+        const buffer = await page.screenshot({ fullPage: false });
+        console.log(`📸 截图已捕获 (${buffer.length} bytes)`);
+        return buffer;
+    } catch (e) {
+        console.error('截图失败:', e.message);
+        return null;
+    }
+}
+
+// 上传图片 Buffer 到企业微信
+async function uploadWechatImageBuffer(buffer, filename = 'screenshot.png') {
     if (!WECHAT_KEY) {
-        console.log('[企业微信] 未配置 WECHAT_KEY，跳过上传图片');
+        console.log('[企业微信] 未配置 WECHAT_KEY');
         return null;
     }
 
-    // 检查文件大小（企业微信限制2MB）
-    const stats = fs.statSync(imagePath);
-    if (stats.size > 2 * 1024 * 1024) {
-        console.log(`[企业微信] 图片过大 (${(stats.size/1024/1024).toFixed(2)}MB)，尝试压缩...`);
-        // 这里可以添加压缩逻辑，暂时跳过
+    if (buffer.length > 2 * 1024 * 1024) {
+        console.log(`[企业微信] 图片过大 (${(buffer.length/1024/1024).toFixed(2)}MB)`);
         return null;
     }
 
@@ -97,14 +101,16 @@ async function uploadWechatImage(imagePath) {
         const url = `${WECHAT_WEBHOOK_BASE}/upload_media?key=${WECHAT_KEY}&type=image`;
         
         const form = new FormData();
-        form.append('media', fs.createReadStream(imagePath), {
-            filename: path.basename(imagePath),
+        form.append('media', buffer, {
+            filename: filename,
             contentType: 'image/png'
         });
 
         const response = await axios.post(url, form, {
             headers: form.getHeaders(),
-            ...AXIOS_CONFIG
+            timeout: 60000,
+            maxBodyLength: 50 * 1024 * 1024,
+            maxContentLength: 50 * 1024 * 1024
         });
 
         if (response.data && response.data.errcode === 0) {
@@ -149,7 +155,7 @@ async function sendWechatImage(mediaId) {
 // 发送企业微信文本消息
 async function sendWechatText(text) {
     if (!WECHAT_KEY) {
-        console.log('[企业微信] 未配置 WECHAT_KEY，跳过发送文本');
+        console.log('[企业微信] 未配置 WECHAT_KEY');
         return;
     }
 
@@ -175,31 +181,48 @@ async function sendWechatText(text) {
     }
 }
 
-// 发送图文消息（分开发送，先文字后图片）
-async function sendWechatMessage(text, imagePaths) {
-    console.log('[企业微信] 开始发送消息...');
-    
-    // 1. 先发送文字
-    await sendWechatText(text);
-    await new Promise(r => setTimeout(r, 1000)); // 等待1秒
-    
-    // 2. 逐个发送图片
-    for (let i = 0; i < imagePaths.length; i++) {
-        const imagePath = imagePaths[i];
-        console.log(`[企业微信] 准备发送第 ${i + 1}/${imagePaths.length} 张图片...`);
-        
-        if (fs.existsSync(imagePath)) {
-            const mediaId = await uploadWechatImage(imagePath);
-            if (mediaId) {
-                await sendWechatImage(mediaId);
-                await new Promise(r => setTimeout(r, 1500)); // 图片间隔1.5秒
-            }
-        } else {
-            console.log(`[企业微信] 图片不存在: ${imagePath}`);
-        }
+// 发送 Markdown 消息
+async function sendWechatMarkdown(markdown) {
+    if (!WECHAT_KEY) {
+        console.log('[企业微信] 未配置 WECHAT_KEY');
+        return;
     }
-    
-    console.log('[企业微信] 消息发送完成');
+
+    try {
+        const url = `${WECHAT_WEBHOOK_BASE}/send?key=${WECHAT_KEY}`;
+        const payload = {
+            msgtype: 'markdown',
+            markdown: { content: markdown }
+        };
+
+        const response = await axios.post(url, payload, {
+            headers: { 'Content-Type': 'application/json' },
+            timeout: 30000
+        });
+
+        if (response.data && response.data.errcode === 0) {
+            console.log('[企业微信] Markdown 消息已发送');
+        } else {
+            console.error('[企业微信] Markdown 发送失败:', response.data.errmsg);
+        }
+    } catch (e) {
+        console.error('[企业微信] Markdown 发送失败:', e.message);
+    }
+}
+
+// 清理临时文件
+function cleanupTempFiles() {
+    try {
+        if (fs.existsSync(SCREENSHOT_DIR)) {
+            const files = fs.readdirSync(SCREENSHOT_DIR);
+            for (const file of files) {
+                fs.unlinkSync(path.join(SCREENSHOT_DIR, file));
+            }
+            console.log('[清理] 临时截图已清除');
+        }
+    } catch (e) {
+        console.error('[清理] 失败:', e.message);
+    }
 }
 
 // 启用 stealth 插件
@@ -431,6 +454,97 @@ async function handleTurnstile(page, contextName = '未知') {
     }
 }
 
+// 获取服务器详情信息
+async function getServerInsights(page) {
+    try {
+        // 等待 Server Insights 区域加载
+        await page.waitForSelector('text="Server Insights"', { timeout: 10000 });
+        
+        const info = await page.evaluate(() => {
+            const data = {};
+            
+            // 查找所有信息行
+            const rows = document.querySelectorAll('div, tr, li');
+            rows.forEach(row => {
+                const text = row.innerText || '';
+                
+                // Identifier
+                if (text.includes('Identifier')) {
+                    const match = text.match(/Identifier\s+([a-f0-9]+)/i);
+                    if (match) data.identifier = match[1];
+                }
+                
+                // Node
+                if (text.includes('Node')) {
+                    const match = text.match(/Node\s+#?(\d+)/i);
+                    if (match) data.node = match[1];
+                }
+                
+                // Memory
+                if (text.includes('Memory') && !text.includes('Server')) {
+                    const match = text.match(/Memory\s+(\d+\s*MB)/i);
+                    if (match) data.memory = match[1];
+                }
+                
+                // Disk
+                if (text.includes('Disk')) {
+                    const match = text.match(/Disk\s+(\d+\s*MB)/i);
+                    if (match) data.disk = match[1];
+                }
+                
+                // CPU
+                if (text.includes('CPU')) {
+                    const match = text.match(/CPU\s+(\d+%)/i);
+                    if (match) data.cpu = match[1];
+                }
+                
+                // Backups
+                if (text.includes('Backups')) {
+                    const match = text.match(/Backups\s+(\d+)/i);
+                    if (match) data.backups = match[1];
+                }
+                
+                // Databases
+                if (text.includes('Databases')) {
+                    const match = text.match(/Databases\s+(\d+)/i);
+                    if (match) data.databases = match[1];
+                }
+                
+                // Allocations
+                if (text.includes('Allocations')) {
+                    const match = text.match(/Allocations\s+(\d+)/i);
+                    if (match) data.allocations = match[1];
+                }
+            });
+            
+            // 备用：直接查找 dt/dd 或类似结构
+            if (Object.keys(data).length === 0) {
+                const allText = document.body.innerText;
+                const identifierMatch = allText.match(/Identifier\s+([a-f0-9]{8})/i);
+                const nodeMatch = allText.match(/Node\s+#?(\d+)/i);
+                const memoryMatch = allText.match(/Memory\s+(\d+\s*MB)/i);
+                const diskMatch = allText.match(/Disk\s+(\d+\s*MB)/i);
+                const cpuMatch = allText.match(/CPU\s+(\d+%)/i);
+                
+                if (identifierMatch) data.identifier = identifierMatch[1];
+                if (nodeMatch) data.node = nodeMatch[1];
+                if (memoryMatch) data.memory = memoryMatch[1];
+                if (diskMatch) data.disk = diskMatch[1];
+                if (cpuMatch) data.cpu = cpuMatch[1];
+            }
+            
+            return data;
+        });
+        
+        console.log('获取到服务器信息:', info);
+        return info;
+        
+    } catch (e) {
+        console.error('获取服务器信息失败:', e.message);
+        return {};
+    }
+}
+
 // 主程序
 (async () => {
     const users = getUsers();
@@ -479,7 +593,6 @@ async function handleTurnstile(page, contextName = '未知') {
         const user = users[i];
         const maskedUser = maskEmail(user.username);
         const safeUser = getSafeUsername(user.username);
-        const screenshots = [];
         
         console.log(`\n=== ${CONFIG.name} - 用户 ${i + 1}/${users.length}: ${maskedUser} ===`);
         
@@ -542,58 +655,37 @@ async function handleTurnstile(page, contextName = '未知') {
             // 等待服务器列表加载
             await page.waitForTimeout(3000);
             
-            // 截图1：登录后的服务器列表页
+            // 截图1：登录后的服务器列表页（直接发送，不保存）
             console.log('截图1：服务器列表...');
-            const screenshot1 = await saveScreenshot(page, `${CONFIG.name}_${safeUser}_01_list.png`);
-            if (screenshot1) screenshots.push(screenshot1);
+            const screenshot1Buffer = await captureScreenshotBuffer(page);
+            if (screenshot1Buffer) {
+                const mediaId1 = await uploadWechatImageBuffer(screenshot1Buffer, 'servers_list.png');
+                if (mediaId1) {
+                    await sendWechatImage(mediaId1);
+                }
+            }
             
-            // 查找并点击第一个服务器卡片（根据你提供的图片结构）
+            // 查找并点击第一个服务器卡片
             console.log('查找第一个服务器卡片...');
             let serverClicked = false;
             
             try {
-                // 根据图片中的结构，服务器卡片包含 "ID ·" 文本和 "Active" 状态
-                // 优先尝试包含特定文本的元素
-                const serverCardSelectors = [
-                    // 包含 ID 文本的卡片（根据你的图片）
-                    'div:has-text("ID ·"):has-text("Active")',
-                    'a:has-text("ID ·")',
-                    'article:has-text("ID ·")',
-                    'div[class*="relative"]:has-text("ID ·")',
-                    // 通用选择器
-                    'a[href*="/servers/"]',
-                    '[class*="server-card"]',
-                    '[class*="instance-card"]',
-                    'article',
-                    '.group',
-                    // 最后尝试包含 webapphost 或类似服务器名称的元素
-                    'div:has-text("webapp"):has-text("Active")'
-                ];
+                // 等待服务器卡片出现
+                await page.waitForSelector(CONFIG.selectors.serverCard, { timeout: 10000 });
                 
-                for (const selector of serverCardSelectors) {
-                    const elements = await page.locator(selector).all();
-                    // 过滤掉 "+ Create Server" 按钮
-                    const serverElements = elements.filter(async (el) => {
-                        const text = await el.innerText().catch(() => '');
-                        return !text.includes('Create') && !text.includes('+') && text.includes('ID');
-                    });
+                // 获取所有服务器卡片
+                const serverCards = await page.locator(CONFIG.selectors.serverCard).all();
+                console.log(`找到 ${serverCards.length} 个服务器卡片`);
+                
+                if (serverCards.length > 0) {
+                    // 滚动到第一个卡片确保可见
+                    await serverCards[0].scrollIntoViewIfNeeded();
+                    await page.waitForTimeout(500);
                     
-                    if (serverElements.length > 0) {
-                        console.log(`找到服务器卡片，使用选择器: ${selector}`);
-                        await serverElements[0].click();
-                        serverClicked = true;
-                        break;
-                    }
-                }
-                
-                // 如果还没找到，尝试通过 href 找服务器链接
-                if (!serverClicked) {
-                    const serverLinks = await page.locator('a[href*="/servers/"]').all();
-                    if (serverLinks.length > 0) {
-                        console.log('通过服务器链接找到');
-                        await serverLinks[0].click();
-                        serverClicked = true;
-                    }
+                    // 点击第一个卡片
+                    await serverCards[0].click();
+                    console.log('已点击第一个服务器卡片');
+                    serverClicked = true;
                 }
                 
             } catch (e) {
@@ -601,45 +693,68 @@ async function handleTurnstile(page, contextName = '未知') {
             }
             
             if (serverClicked) {
-                console.log('已点击服务器卡片，等待详情页加载...');
+                // 等待详情页加载
                 await page.waitForTimeout(3000);
+                
+                // 等待 URL 变化
+                await page.waitForURL('**/servers/**', { timeout: 10000 });
+                console.log('当前URL:', page.url());
                 
                 // 截图2：服务器详情页
                 console.log('截图2：服务器详情...');
-                const screenshot2 = await saveScreenshot(page, `${CONFIG.name}_${safeUser}_02_detail.png`);
-                if (screenshot2) screenshots.push(screenshot2);
+                const screenshot2Buffer = await captureScreenshotBuffer(page);
+                if (screenshot2Buffer) {
+                    const mediaId2 = await uploadWechatImageBuffer(screenshot2Buffer, 'server_detail.png');
+                    if (mediaId2) {
+                        await sendWechatImage(mediaId2);
+                    }
+                }
+                
+                // 获取 Server Insights 信息
+                console.log('获取服务器信息...');
+                const serverInfo = await getServerInsights(page);
+                
+                // 格式化并发送服务器信息
+                const infoText = `
+🖥️ **服务器信息**
+
+Identifier: ${serverInfo.identifier || 'N/A'}
+Node: ${serverInfo.node ? '#' + serverInfo.node : 'N/A'}
+Memory: ${serverInfo.memory || 'N/A'}
+Disk: ${serverInfo.disk || 'N/A'}
+CPU: ${serverInfo.cpu || 'N/A'}
+Backups: ${serverInfo.backups || 'N/A'}
+Databases: ${serverInfo.databases || 'N/A'}
+Allocations: ${serverInfo.allocations || 'N/A'}
+                `.trim();
+                
+                await sendWechatText(infoText);
+                
             } else {
                 console.log('未找到可点击的服务器卡片');
+                await sendWechatText('⚠️ 未找到服务器卡片');
             }
-            
-            // 发送消息（分开文字和图片）
-            const serverInfo = serverClicked ? '✅ 已点击服务器卡片' : '⚠️ 未找到服务器卡片';
-            const successMsg = `${CONFIG.name} 登录成功\n用户: ${maskedUser}\n${serverInfo}`;
-            
-            console.log('准备发送企业微信消息...');
-            await sendWechatMessage(successMsg, screenshots);
 
         } catch (err) {
             console.error(`处理出错:`, err);
             const errorMsg = `❌ ${CONFIG.name} 处理出错\n用户: ${maskedUser}\n错误: ${err.message}`;
-            
-            if (screenshots.length > 0) {
-                await sendWechatMessage(errorMsg, screenshots);
-            } else {
-                await sendWechatText(errorMsg);
-            }
+            await sendWechatText(errorMsg);
         }
         
         console.log(`用户 ${maskedUser} 处理完成`);
         console.log('---');
         
-        // 用户之间等待一段时间
+        // 用户之间等待
         if (i < users.length - 1) {
-            await new Promise(r => setTimeout(r, 3000));
+            await new Promise(r => setTimeout(r, 5000));
         }
     }
 
     console.log('\n所有用户处理完成');
+    
+    // 清理临时文件
+    cleanupTempFiles();
+    
     try { await browser.close(); } catch (e) {}
     process.exit(0);
 })();
