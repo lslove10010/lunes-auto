@@ -55,15 +55,15 @@ function getSafeUsername(username) {
     return masked.replace(/[^a-z0-9]/gi, '_');
 }
 
-// 截图为 PNG（Python 代码用的 PNG）
+// 截图（PNG格式）
 async function captureScreenshot(page, filename) {
     const filepath = path.join(TEMP_DIR, filename);
     try {
-        await page.setViewportSize({ width: 1920, height: 1080 });
+        await page.setViewportSize({ width: 1280, height: 720 });
         await page.screenshot({ 
             path: filepath,
             type: 'png',
-            fullPage: true  // Python 代码用的 full_page=True
+            fullPage: false
         });
         
         const stats = fs.statSync(filepath);
@@ -75,7 +75,7 @@ async function captureScreenshot(page, filename) {
     }
 }
 
-// 发送企业微信图片（使用 base64 + md5，参考 Python 代码）
+// 发送企业微信图片（使用 base64 + md5）
 async function sendWechatImage(imagePath) {
     if (!WECHAT_KEY) {
         console.log('[企业微信] 未配置 WECHAT_KEY');
@@ -88,14 +88,11 @@ async function sendWechatImage(imagePath) {
     }
 
     try {
-        // 读取文件并计算 base64 和 md5
         const imageData = fs.readFileSync(imagePath);
         const imageBase64 = imageData.toString('base64');
         const imageMd5 = crypto.createHash('md5').update(imageData).digest('hex');
 
         console.log(`[企业微信] 准备发送图片: ${path.basename(imagePath)}`);
-        console.log(`[企业微信] 图片大小: ${(imageData.length/1024).toFixed(2)}KB`);
-        console.log(`[企业微信] MD5: ${imageMd5}`);
 
         const url = `${WECHAT_WEBHOOK_BASE}/send?key=${WECHAT_KEY}`;
         
@@ -114,8 +111,6 @@ async function sendWechatImage(imagePath) {
             maxContentLength: 50 * 1024 * 1024
         });
 
-        console.log('[企业微信] 响应:', response.data);
-
         if (response.data && response.data.errcode === 0) {
             console.log('[企业微信] 图片发送成功');
             return true;
@@ -125,9 +120,6 @@ async function sendWechatImage(imagePath) {
         }
     } catch (e) {
         console.error('[企业微信] 图片发送失败:', e.message);
-        if (e.response) {
-            console.error('[企业微信] 错误响应:', e.response.data);
-        }
         return false;
     }
 }
@@ -143,11 +135,7 @@ async function sendWechatText(text) {
         const url = `${WECHAT_WEBHOOK_BASE}/send?key=${WECHAT_KEY}`;
         const payload = {
             msgtype: 'text',
-            text: { 
-                content: text,
-                mentioned_list: [],
-                mentioned_mobile_list: []
-            }
+            text: { content: text }
         };
 
         const response = await axios.post(url, payload, {
@@ -298,7 +286,7 @@ async function launchChrome() {
         '--no-first-run',
         '--no-default-browser-check',
         '--disable-gpu',
-        '--window-size=1920,1080',
+        '--window-size=1280,720',
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--user-data-dir=/tmp/chrome_user_data',
@@ -412,120 +400,69 @@ async function handleTurnstile(page, contextName = '未知') {
     }
 }
 
-// 获取服务器详情信息（参考 Python 代码）
-async function getServerStats(page) {
-    const stats = {};
-    
+// 获取服务器详情信息
+async function getServerInsights(page) {
     try {
-        // 等待 Uptime 出现
-        await page.waitForSelector("text=Uptime", { state: 'visible', timeout: 20000 });
-        console.log("找到 'Uptime' 元素，页面已加载");
+        await page.waitForSelector('text="Server Insights"', { timeout: 10000 });
         
-        // 提取 Address
-        try {
-            const addressText = await page.locator("text=node22.lunes.host, text=Address").innerText({ timeout: 5000 });
-            if (addressText) {
-                stats.address = addressText.trim();
-                console.log(`提取到 address: ${stats.address}`);
-            }
-        } catch (e) {
-            // 忽略
-        }
-        
-        // 卡片提取
-        const cards = await page.locator("div.grid > div, div[class*='card'], div[class*='stat'], div[class*='bg-'], section, article").all();
-        console.log(`找到 ${cards.length} 个潜在统计卡片`);
-        
-        for (const card of cards) {
-            try {
-                const text = await card.innerText();
-                if (!text) continue;
-                
-                const lowerText = text.toLowerCase();
-                
-                if (lowerText.includes("uptime")) {
-                    stats.uptime = text.replace(/uptime/i, "").replace(":", "").trim();
-                } else if (lowerText.includes("cpu load") || (lowerText.includes("cpu") && lowerText.includes("load"))) {
-                    stats.cpu_load = text.replace(/cpu load/i, "").replace(":", "").trim();
-                } else if (lowerText.includes("memory") && !lowerText.includes("network")) {
-                    stats.memory = text.replace(/memory/i, "").replace(":", "").trim();
-                } else if (lowerText.includes("disk")) {
-                    stats.disk = text.replace(/disk/i, "").replace(":", "").trim();
-                } else if (lowerText.includes("inbound") || lowerText.includes("network (inbound)")) {
-                    stats.network_in = text.replace(/network \(inbound\)/i, "").replace(/inbound/i, "").replace(":", "").trim();
-                } else if (lowerText.includes("outbound") || lowerText.includes("network (outbound)")) {
-                    stats.network_out = text.replace(/network \(outbound\)/i, "").replace(/outbound/i, "").replace(":", "").trim();
-                }
-            } catch (e) {
-                // 忽略单个卡片错误
-            }
-        }
-        
-        // 保底：整个 body 文本
-        if (Object.keys(stats).length < 4) {
-            console.log("卡片提取不完整，使用 body 文本保底");
-            const bodyText = await page.innerText('body');
-            const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l);
+        const info = await page.evaluate(() => {
+            const data = {};
             
-            for (let i = 0; i < lines.length; i++) {
-                const line = lines[i].toLowerCase();
-                if (line.includes("uptime") && i + 1 < lines.length) {
-                    stats.uptime = lines[i + 1];
+            const rows = document.querySelectorAll('div, tr, li');
+            rows.forEach(row => {
+                const text = row.innerText || '';
+                
+                if (text.includes('Identifier')) {
+                    const match = text.match(/Identifier\s+([a-f0-9]+)/i);
+                    if (match) data.identifier = match[1];
                 }
-                if ((line.includes("cpu load") || (line.includes("cpu") && line.includes("load"))) && i + 1 < lines.length) {
-                    stats.cpu_load = lines[i + 1];
+                
+                if (text.includes('Node')) {
+                    const match = text.match(/Node\s+#?(\d+)/i);
+                    if (match) data.node = match[1];
                 }
-                if (line.includes("memory") && !line.includes("network") && i + 1 < lines.length) {
-                    stats.memory = lines[i + 1];
+                
+                if (text.includes('Memory') && !text.includes('Server')) {
+                    const match = text.match(/Memory\s+(\d+\s*MB)/i);
+                    if (match) data.memory = match[1];
                 }
-                if (line.includes("disk") && i + 1 < lines.length) {
-                    stats.disk = lines[i + 1];
+                
+                if (text.includes('Disk')) {
+                    const match = text.match(/Disk\s+(\d+\s*MB)/i);
+                    if (match) data.disk = match[1];
                 }
-                if ((line.includes("inbound") || line.includes("network in")) && i + 1 < lines.length) {
-                    stats.network_in = lines[i + 1];
+                
+                if (text.includes('CPU')) {
+                    const match = text.match(/CPU\s+(\d+%)/i);
+                    if (match) data.cpu = match[1];
                 }
-                if ((line.includes("outbound") || line.includes("network out")) && i + 1 < lines.length) {
-                    stats.network_out = lines[i + 1];
-                }
+            });
+            
+            if (Object.keys(data).length === 0) {
+                const allText = document.body.innerText;
+                const identifierMatch = allText.match(/Identifier\s+([a-f0-9]{8})/i);
+                const nodeMatch = allText.match(/Node\s+#?(\d+)/i);
+                const memoryMatch = allText.match(/Memory\s+(\d+\s*MB)/i);
+                const diskMatch = allText.match(/Disk\s+(\d+\s*MB)/i);
+                const cpuMatch = allText.match(/CPU\s+(\d+%)/i);
+                
+                if (identifierMatch) data.identifier = identifierMatch[1];
+                if (nodeMatch) data.node = nodeMatch[1];
+                if (memoryMatch) data.memory = memoryMatch[1];
+                if (diskMatch) data.disk = diskMatch[1];
+                if (cpuMatch) data.cpu = cpuMatch[1];
             }
-        }
+            
+            return data;
+        });
         
-        console.log(`提取成功: ${JSON.stringify(stats)}`);
+        console.log('获取到服务器信息:', info);
+        return info;
         
     } catch (e) {
-        console.error(`提取统计信息失败: ${e.message}`);
-        stats.error = e.message;
+        console.error('获取服务器信息失败:', e.message);
+        return {};
     }
-    
-    return stats;
-}
-
-// 格式化统计信息
-function formatStatsMessage(stats, username) {
-    // 打码 server ID
-    let address = stats.address || 'N/A';
-    if (address.includes('564fec71')) {
-        address = address.replace('564fec71', '***');
-    }
-    
-    const now = new Date();
-    const beijingTime = new Date(now.getTime() + 8 * 60 * 60 * 1000).toISOString().replace('T', ' ').substring(0, 19);
-    
-    const lines = [];
-    lines.push("🖥️ 服务器状态监控");
-    lines.push("");
-    lines.push(`👤 用户: ${username}`);
-    lines.push(`📍 地址: ${address}`);
-    lines.push(`⏱️ 运行时间: ${stats.uptime || 'N/A'}`);
-    lines.push(`💻 CPU 负载: ${stats.cpu_load || 'N/A'}`);
-    lines.push(`🧠 内存使用: ${stats.memory || 'N/A'}`);
-    lines.push(`💾 磁盘使用: ${stats.disk || 'N/A'}`);
-    lines.push(`📥 网络入站: ${stats.network_in || 'N/A'}`);
-    lines.push(`📤 网络出站: ${stats.network_out || 'N/A'}`);
-    lines.push("");
-    lines.push(`更新时间: ${beijingTime}`);
-    
-    return lines.join('\n');
 }
 
 // 主程序
@@ -594,7 +531,8 @@ function formatStatsMessage(stats, username) {
             // 进入登录页
             console.log('导航到登录页...');
             const loginUrl = `${CONFIG.baseUrl}${CONFIG.loginPath}`;
-            await page.goto(loginUrl, { waitUntil: 'networkidle', timeout: 30000 });
+            await page.goto(loginUrl);
+            await page.waitForTimeout(2000);
 
             // 处理登录页 Turnstile
             await handleTurnstile(page, '登录页');
@@ -607,101 +545,99 @@ function formatStatsMessage(stats, username) {
             
             await page.waitForSelector(CONFIG.selectors.passwordInput, { timeout: 10000 });
             await page.fill(CONFIG.selectors.passwordInput, user.password);
-
-            // 截图：登录信息填写后
-            const loginFilledScreenshot = await captureScreenshot(page, `${safeUser}_login_filled.png`);
+            
+            await page.waitForTimeout(500);
 
             // 再次检查 Turnstile
             await handleTurnstile(page, '登录前');
             
             // 点击登录按钮
             console.log('点击登录...');
-            try {
-                await page.getByRole('button', { name: 'Login', exact: false }).click({ timeout: 10000 });
-            } catch (e) {
-                await page.locator("button:has-text('Login')").click({ timeout: 10000 });
-            }
-            
-            await page.waitForTimeout(1000);
-            
-            // 截图：点击登录后
-            const afterClickScreenshot = await captureScreenshot(page, `${safeUser}_after_click.png`);
-            await sendWechatImage(afterClickScreenshot);
-            
-            // 等待页面加载
-            await page.waitForLoadState('networkidle', { timeout: 20000 });
-            await page.waitForTimeout(2500);
+            await page.click(CONFIG.selectors.loginButton);
+            await page.waitForTimeout(4000);
 
             // 检查登录结果
-            const currentUrl = page.url();
-            if (currentUrl.includes('/login') || currentUrl.includes('/error')) {
-                // 检查是否有 webapphost 文字
-                const hasWebapphost = await page.locator('text=webapphost').count() > 0;
-                if (!hasWebapphost) {
-                    const failScreenshot = await captureScreenshot(page, `${safeUser}_login_failed.png`);
-                    await sendWechatImage(failScreenshot);
-                    
-                    const msg = `❌ ${CONFIG.name} 登录失败\n用户: ${maskedUser}\nURL: ${currentUrl}`;
-                    await sendWechatText(msg);
-                    continue;
-                }
+            if (CONFIG.checkLoginError(page.url())) {
+                let failReason = '未知错误';
+                try {
+                    const errorText = await page.locator('text=/incorrect|invalid|error|failed/i').first().innerText({ timeout: 2000 });
+                    if (errorText) failReason = errorText;
+                } catch (e) {}
+                
+                const msg = `❌ ${CONFIG.name} 登录失败\n用户: ${maskedUser}\n原因: ${failReason}`;
+                console.log(msg);
+                await sendWechatText(msg);
+                continue;
             }
 
             console.log('✅ 登录成功');
-            console.log(`当前 URL: ${currentUrl}`);
             
-            // 截图：Dashboard
-            const dashboardScreenshot = await captureScreenshot(page, `${safeUser}_dashboard.png`);
-            await sendWechatImage(dashboardScreenshot);
-            
-            // 发送登录成功通知
-            const successMsg = `✅ 登录成功！\n用户: ${maskedUser}\n页面: ${currentUrl}`;
-            await sendWechatText(successMsg);
-            
-            // 查找并点击 webapphost
-            console.log('查找 webapphost...');
-            await page.waitForSelector('text=webapphost', { timeout: 10000 });
-            
-            const webapphostLink = page.locator('text=webapphost').first;
-            const isVisible = await webapphostLink.isVisible();
-            
-            if (!isVisible) {
-                throw new Error('未找到 webapphost 链接');
-            }
-            
-            console.log('点击进入 webapphost...');
-            await webapphostLink.click();
-            
-            // 等待详情页加载
-            await page.waitForLoadState('networkidle');
+            // 等待服务器列表加载
             await page.waitForTimeout(3000);
             
-            const detailUrl = page.url();
-            console.log(`进入服务器详情页: ${detailUrl.replace('564fec71', '***')}`);
+            // 截图1：服务器列表页
+            console.log('截图1：服务器列表...');
+            const screenshot1Path = await captureScreenshot(page, `${safeUser}_01_list.png`);
+            if (screenshot1Path) {
+                await sendWechatImage(screenshot1Path);
+            }
             
-            // 截图：服务器详情
-            const detailScreenshot = await captureScreenshot(page, `${safeUser}_server_detail.png`);
-            await sendWechatImage(detailScreenshot);
+            // 查找并点击第一个服务器卡片
+            console.log('查找第一个服务器卡片...');
+            let serverClicked = false;
             
-            // 提取服务器统计信息
-            console.log('提取服务器统计信息...');
-            const stats = await getServerStats(page);
+            try {
+                await page.waitForSelector(CONFIG.selectors.serverCard, { timeout: 10000 });
+                const serverCards = await page.locator(CONFIG.selectors.serverCard).all();
+                console.log(`找到 ${serverCards.length} 个服务器卡片`);
+                
+                if (serverCards.length > 0) {
+                    await serverCards[0].scrollIntoViewIfNeeded();
+                    await page.waitForTimeout(500);
+                    await serverCards[0].click();
+                    console.log('已点击第一个服务器卡片');
+                    serverClicked = true;
+                }
+                
+            } catch (e) {
+                console.error('点击服务器失败:', e.message);
+            }
             
-            // 发送统计信息
-            const statsMessage = formatStatsMessage(stats, maskedUser);
-            await sendWechatText(statsMessage);
+            if (serverClicked) {
+                // 等待详情页加载
+                await page.waitForTimeout(3000);
+                await page.waitForURL('**/servers/**', { timeout: 10000 });
+                console.log('当前URL:', page.url());
+                
+                // 截图2：服务器详情页
+                console.log('截图2：服务器详情...');
+                const screenshot2Path = await captureScreenshot(page, `${safeUser}_02_detail.png`);
+                if (screenshot2Path) {
+                    await sendWechatImage(screenshot2Path);
+                }
+                
+                // 获取 Server Insights 信息
+                console.log('获取服务器信息...');
+                const serverInfo = await getServerInsights(page);
+                
+                // 发送服务器信息
+                const infoText = `服务器信息
+用户: ${maskedUser}
+Identifier: ${serverInfo.identifier || 'N/A'}
+Node: ${serverInfo.node ? '#' + serverInfo.node : 'N/A'}
+Memory: ${serverInfo.memory || 'N/A'}
+Disk: ${serverInfo.disk || 'N/A'}
+CPU: ${serverInfo.cpu || 'N/A'}`;
+                
+                await sendWechatText(infoText);
+                
+            } else {
+                console.log('未找到可点击的服务器卡片');
+                await sendWechatText('⚠️ 未找到服务器卡片');
+            }
 
         } catch (err) {
             console.error(`处理出错:`, err);
-            
-            // 尝试截图错误页面
-            try {
-                const errorScreenshot = await captureScreenshot(page, `${safeUser}_error.png`);
-                await sendWechatImage(errorScreenshot);
-            } catch (e) {
-                // 忽略截图错误
-            }
-            
             const errorMsg = `❌ ${CONFIG.name} 处理出错\n用户: ${maskedUser}\n错误: ${err.message}`;
             await sendWechatText(errorMsg);
         }
