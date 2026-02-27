@@ -55,20 +55,39 @@ function getSafeUsername(username) {
     return masked.replace(/[^a-z0-9]/gi, '_');
 }
 
-// 截图为 JPG（Playwright 原生支持）
+// 截图为 JPG（企业微信要求）
 async function captureScreenshotJPG(page, filename) {
-    const filepath = path.join(TEMP_DIR, filename);
+    // 确保使用 .jpg 后缀
+    const jpgFilename = filename.replace(/\.(png|jpeg|jpg)$/i, '.jpg');
+    const filepath = path.join(TEMP_DIR, jpgFilename);
+    
     try {
         await page.setViewportSize({ width: 1280, height: 720 });
         
-        // Playwright 直接输出 JPEG
-        await page.screenshot({ 
-            path: filepath,
+        // Playwright 输出 JPEG 格式
+        const buffer = await page.screenshot({ 
             type: 'jpeg',
-            quality: 85
+            quality: 80  // 稍微降低质量确保文件大小
         });
         
-        console.log(`📸 截图已保存: ${filepath} (${(fs.statSync(filepath).size/1024).toFixed(2)}KB)`);
+        // 保存为文件
+        fs.writeFileSync(filepath, buffer);
+        
+        const stats = fs.statSync(filepath);
+        console.log(`📸 截图已保存: ${jpgFilename} (${(stats.size/1024).toFixed(2)}KB)`);
+        
+        // 如果大于 2MB，尝试降低质量重新截图
+        if (stats.size > 2 * 1024 * 1024) {
+            console.log('图片过大，尝试降低质量...');
+            const buffer2 = await page.screenshot({ 
+                type: 'jpeg',
+                quality: 60
+            });
+            fs.writeFileSync(filepath, buffer2);
+            const stats2 = fs.statSync(filepath);
+            console.log(`📸 重新保存: ${jpgFilename} (${(stats2.size/1024).toFixed(2)}KB)`);
+        }
+        
         return filepath;
     } catch (e) {
         console.error('截图失败:', e.message);
@@ -89,8 +108,12 @@ async function uploadWechatImage(imagePath) {
     }
 
     const stats = fs.statSync(imagePath);
+    const fileSizeKB = (stats.size / 1024).toFixed(2);
+    console.log(`[企业微信] 准备上传: ${path.basename(imagePath)} (${fileSizeKB}KB)`);
+
+    // 检查大小
     if (stats.size > 2 * 1024 * 1024) {
-        console.log(`[企业微信] 图片过大 (${(stats.size/1024/1024).toFixed(2)}MB)，跳过`);
+        console.log(`[企业微信] 图片过大 (${(stats.size/1024/1024).toFixed(2)}MB > 2MB)，跳过`);
         return null;
     }
 
@@ -98,11 +121,15 @@ async function uploadWechatImage(imagePath) {
         const url = `${WECHAT_WEBHOOK_BASE}/upload_media?key=${WECHAT_KEY}&type=image`;
         
         const form = new FormData();
+        
+        // 必须使用正确的 filename 和 contentType
         form.append('media', fs.createReadStream(imagePath), {
-            filename: path.basename(imagePath),
-            contentType: 'image/jpeg'
+            filename: path.basename(imagePath),  // 必须是 .jpg
+            contentType: 'image/jpg'  // 注意：是 image/jpg 不是 image/jpeg
         });
 
+        console.log('[企业微信] 开始上传...');
+        
         const response = await axios.post(url, form, {
             headers: form.getHeaders(),
             timeout: 60000,
@@ -110,8 +137,10 @@ async function uploadWechatImage(imagePath) {
             maxContentLength: 10 * 1024 * 1024
         });
 
+        console.log('[企业微信] 上传响应:', response.data);
+
         if (response.data && response.data.errcode === 0) {
-            console.log('[企业微信] 图片上传成功:', response.data.media_id);
+            console.log('[企业微信] 图片上传成功, media_id:', response.data.media_id);
             return response.data.media_id;
         } else {
             console.error('[企业微信] 图片上传失败:', response.data);
@@ -120,7 +149,7 @@ async function uploadWechatImage(imagePath) {
     } catch (e) {
         console.error('[企业微信] 图片上传失败:', e.message);
         if (e.response) {
-            console.error('[企业微信] 响应:', e.response.data);
+            console.error('[企业微信] 错误响应:', e.response.data);
         }
         return null;
     }
