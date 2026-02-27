@@ -55,6 +55,11 @@ function getSafeUsername(username) {
     return masked.replace(/[^a-z0-9]/gi, '_');
 }
 
+// 脱敏 URL（用于日志输出）
+function maskServerUrl(url) {
+    return url.replace(/\/servers\/\d+/, '/servers/***');
+}
+
 // 截图（PNG格式）
 async function captureScreenshot(page, filename) {
     const filepath = path.join(TEMP_DIR, filename);
@@ -456,13 +461,40 @@ async function getServerInsights(page) {
             return data;
         });
         
-        console.log('获取到服务器信息:', info);
+        console.log('获取到服务器信息:', {
+            identifier: info.identifier ? '***' : 'N/A',
+            node: info.node || 'N/A',
+            memory: info.memory || 'N/A',
+            disk: info.disk || 'N/A',
+            cpu: info.cpu || 'N/A'
+        });
+        
         return info;
         
     } catch (e) {
         console.error('获取服务器信息失败:', e.message);
         return {};
     }
+}
+
+// 格式化美化后的服务器信息（用于企业微信）
+function formatServerInfo(info, username, url) {
+    const lines = [];
+    lines.push('🎉 LunesHost 登录成功');
+    lines.push('');
+    lines.push(`👤 用户: ${username}`);
+    lines.push(`🔗 链接: ${url}`);
+    lines.push('');
+    lines.push('📊 服务器配置');
+    lines.push('━━━━━━━━━━━━━━');
+    lines.push(`🆔 Identifier: ${info.identifier || 'N/A'}`);
+    lines.push(`🖥️  Node: #${info.node || 'N/A'}`);
+    lines.push(`🧠 Memory: ${info.memory || 'N/A'}`);
+    lines.push(`💾 Disk: ${info.disk || 'N/A'}`);
+    lines.push(`⚡ CPU: ${info.cpu || 'N/A'}`);
+    lines.push('━━━━━━━━━━━━━━');
+    
+    return lines.join('\n');
 }
 
 // 主程序
@@ -607,9 +639,13 @@ async function getServerInsights(page) {
                 // 等待详情页加载
                 await page.waitForTimeout(3000);
                 await page.waitForURL('**/servers/**', { timeout: 10000 });
-                const currentUrl = page.url();
-                console.log('当前URL:', currentUrl.replace(/\/servers\/\d+/, '/servers/***'));
-                //console.log('当前URL:', page.url());
+                
+                // 获取真实URL（用于企业微信）和脱敏URL（用于日志）
+                const realUrl = page.url();
+                const maskedUrl = maskServerUrl(realUrl);
+                
+                // 日志输出脱敏URL
+                console.log('当前URL:', maskedUrl);
                 
                 // 截图2：服务器详情页
                 console.log('截图2：服务器详情...');
@@ -622,15 +658,8 @@ async function getServerInsights(page) {
                 console.log('获取服务器信息...');
                 const serverInfo = await getServerInsights(page);
                 
-                // 发送服务器信息
-                const infoText = `服务器信息
-用户: ${maskedUser}
-Identifier: ${serverInfo.identifier || 'N/A'}
-Node: ${serverInfo.node ? '#' + serverInfo.node : 'N/A'}
-Memory: ${serverInfo.memory || 'N/A'}
-Disk: ${serverInfo.disk || 'N/A'}
-CPU: ${serverInfo.cpu || 'N/A'}`;
-                
+                // 发送美化的服务器信息（使用真实URL，不脱敏）
+                const infoText = formatServerInfo(serverInfo, maskedUser, realUrl);
                 await sendWechatText(infoText);
                 
             } else {
