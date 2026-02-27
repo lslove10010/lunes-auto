@@ -607,7 +607,9 @@ async function getServerInsights(page) {
                 // 等待详情页加载
                 await page.waitForTimeout(3000);
                 await page.waitForURL('**/servers/**', { timeout: 10000 });
-                console.log('当前URL:', page.url());
+                const currentUrl = page.url();
+                console.log('当前URL:', currentUrl.replace(/\/servers\/\d+/, '/servers/***'));
+                //console.log('当前URL:', page.url());
                 
                 // 截图2：服务器详情页
                 console.log('截图2：服务器详情...');
