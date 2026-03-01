@@ -2,8 +2,9 @@ name: LunesHost Auto Login
 
 on:
   schedule:
-    # 每天 UTC 0点 (北京时间 8点) 运行
-    - cron: '0 0 * * *'
+    # 每月1日、11日、21日的北京时间随机时段（UTC 0-14点，对应北京时间8-22点）
+    # 实际运行时间由 GitHub 在指定窗口内随机分配
+    - cron: '0 0-14 1,11,21 * *'
   workflow_dispatch: # 允许手动触发
 
 jobs:
@@ -14,7 +15,7 @@ jobs:
     - uses: actions/checkout@v4
     
     - name: Setup Node.js
-      uses: actions/setup-node@v4
+      uses: actions/setup-python@v5
       with:
         node-version: '20'
         
